@@ -13,6 +13,7 @@ import Language.Haskell.Ghcid.Escape
 import Language.Haskell.Ghcid.Util
 import Language.Haskell.Ghcid.Types
 import Data.IORef
+import Data.Function ((&))
 import System.Time.Extra
 import System.Process
 import System.FilePath
@@ -23,7 +24,7 @@ import Data.Maybe
 import Data.List.Extra
 import Control.Applicative
 import Prelude
-
+import Data.Ord (Down (..), comparing)
 
 data Session = Session
     {ghci :: IORef (Maybe Ghci) -- ^ The Ghci session, or Nothing if there is none
@@ -79,7 +80,7 @@ qualify dir xs = [x{loadFile = dir </> loadFile x} | x <- xs]
 
 -- | Spawn a new Ghci process at a given command line. Returns the load messages, plus
 --   the list of files that were observed (both those loaded and those that failed to load).
-sessionStart :: Session -> String -> [String] -> IO ([Load], [FilePath])
+sessionStart :: Session -> String -> [String] -> IO ([Load], [FilePath], [(Pass, String, Double, Double)])
 sessionStart Session{..} cmd setup = do
     modifyVar_ running $ const $ return False
     writeIORef command $ Just (cmd, setup)
@@ -91,10 +92,16 @@ sessionStart Session{..} cmd setup = do
 
     -- start the new
     outStrLn $ "Loading " ++ cmd ++ " ..."
-    (v, messages) <- mask $ \unmask -> do
+    (v, messages') <- mask $ \unmask -> do
         (v, messages) <- unmask $ startGhci cmd Nothing $ const outStrLn
         writeIORef ghci $ Just v
         return (v, messages)
+
+    let slowestPasses =
+            [(loadPass, loadModule, loadTime, loadMegabytes) | m@PassTiming{..} <- messages']
+            & sortBy (comparing (Down . (\(_, _, t, _) -> t)))
+            & take 100
+        messages = filter (not . isPassTiming) messages'
 
     -- do whatever preparation was requested
     exec v $ unlines setup
@@ -115,11 +122,12 @@ sessionStart Session{..} cmd setup = do
     -- handle what the process returned
     messages <- return $ mapMaybe tidyMessage messages
     writeIORef warnings [m | m@Message{..} <- messages, loadSeverity == Warning]
-    return (messages, loadedModules messages)
+
+    return (messages, loadedModules messages, slowestPasses)
 
 
 -- | Call 'sessionStart' at the previous command.
-sessionRestart :: Session -> IO ([Load], [FilePath])
+sessionRestart :: Session -> IO ([Load], [FilePath], [(Pass, String, Double, Double)])
 sessionRestart session@Session{..} = do
     Just (cmd, setup) <- readIORef command
     sessionStart session cmd setup
@@ -128,7 +136,7 @@ sessionRestart session@Session{..} = do
 -- | Reload, returning the same information as 'sessionStart'. In particular, any
 --   information that GHCi doesn't repeat (warnings from loaded modules) will be
 --   added back in.
-sessionReload :: Session -> IO ([Load], [FilePath])
+sessionReload :: Session -> IO ([Load], [FilePath], [(Pass, String, Double, Double)])
 sessionReload session@Session{..} = do
     -- kill anything async, set stuck if you didn't succeed
     old <- modifyVar running $ \b -> return (False, b)
@@ -140,7 +148,16 @@ sessionReload session@Session{..} = do
         -- actually reload
         Just ghci <- readIORef ghci
         dir <- readIORef curdir
-        messages <- mapMaybe tidyMessage . qualify dir <$> reload ghci
+        msgs <- reload ghci
+
+        let slowestPasses =
+                [(loadPass, loadModule, loadTime, loadMegabytes) | m@PassTiming{..} <- msgs]
+                & sortBy (comparing (Down . (\(_, _, t, _) -> t)))
+                & take 100
+            messages' = filter (not . isPassTiming) msgs
+            messages = mapMaybe tidyMessage $ qualify dir messages'
+
+        putStrLn $ show messages
         loaded <- map ((dir </>) . snd) <$> showModules ghci
         let reloaded = loadedModules messages
         warn <- readIORef warnings
@@ -151,7 +168,8 @@ sessionReload session@Session{..} = do
         messages <- return $ messages ++ filter validWarn warn
 
         writeIORef warnings [m | m@Message{..} <- messages, loadSeverity == Warning]
-        return (messages, nubOrd $ loaded ++ reloaded)
+
+        return (messages, nubOrd $ loaded ++ reloaded, slowestPasses)
 
 
 -- | Run an exec operation asynchronously. Should not be a @:reload@ or similar.

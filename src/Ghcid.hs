@@ -221,13 +221,14 @@ data Continue = Continue
 -- Use Continue not () so that inadvertant exits don't restart
 runGhcid :: Session -> Waiter -> IO (Int,Int) -> ([String] -> IO ()) -> Options -> IO Continue
 runGhcid session waiter termSize termOutput opts@Options{..} = do
-    let outputFill :: String -> Maybe (Int, [Load]) -> [String] -> IO ()
-        outputFill currTime load msg = do
+    let outputFill :: String -> Maybe (Int, [Load]) -> [String] -> [(Pass, String, Double, Double)] -> IO ()
+        outputFill currTime load msg slowestPasses = do
             (width, height) <- termSize
             let n = height - length msg
             load <- return $ take (if isJust load then n else 0) $ prettyOutput max_messages currTime (maybe 0 fst load)
                 [ m{loadMessage = map fromEsc $ concatMap (chunksOfWordE width (width `div` 5) . Esc) $ loadMessage m}
                 | m@Message{} <- maybe [] snd load]
+                slowestPasses
             termOutput $ load ++ msg ++ replicate (height - (length load + length msg)) ""
 
     when (ignoreLoaded && null reload) $ do
@@ -235,7 +236,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} = do
         exitFailure
 
     nextWait <- waitFiles waiter
-    (messages, loaded) <- sessionStart session command $
+    (messages, loaded, slowestPasses) <- sessionStart session command $
         map (":set " ++) (ghciFlagsUseful ++ ghciFlagsUsefulVersioned) ++ setup
 
     when (null loaded && not ignoreLoaded) $ do
@@ -250,7 +251,7 @@ runGhcid session waiter termSize termOutput opts@Options{..} = do
     project <- if project /= "" then return project else takeFileName <$> getCurrentDirectory
 
     -- fire, given a waiter, the messages/loaded
-    let fire nextWait (messages, loaded) = do
+    let fire nextWait (messages, loaded, slowestPasses) = do
             currTime <- getShortTime
             let loadedCount = length loaded
             whenLoud $ do
@@ -283,13 +284,13 @@ runGhcid session waiter termSize termOutput opts@Options{..} = do
                 let f x = lookup (loadFile x) errTimes
                 return $ sortOn (Down . f) msgError ++ msgWarn
 
-            outputFill currTime (Just (loadedCount, ordMessages)) ["Running test..." | isJust test]
+            outputFill currTime (Just (loadedCount, ordMessages)) ["Running test..." | isJust test] slowestPasses
             forM_ outputfile $ \file ->
                 writeFile file $
                     if takeExtension file == ".json" then
                         showJSON [("loaded",map jString loaded),("messages",map jMessage $ filter isMessage messages)]
                     else
-                        unlines $ map unescape $ prettyOutput max_messages currTime loadedCount ordMessages
+                        unlines $ map unescape $ prettyOutput max_messages currTime loadedCount ordMessages slowestPasses
             when (null loaded && not ignoreLoaded) $ do
                 putStrLn "No files loaded, nothing to wait for. Fix the last error and restart."
                 exitFailure
@@ -312,21 +313,22 @@ runGhcid session waiter termSize termOutput opts@Options{..} = do
             currTime <- getShortTime
             if not $ null restartChanged then do
                 -- exit cleanly, since the whole thing is wrapped in a forever
-                unless no_status $ outputFill currTime Nothing $ "Restarting..." : map ("  " ++) restartChanged
+                unless no_status $ outputFill currTime Nothing ("Restarting..." : map ("  " ++) restartChanged) slowestPasses
                 return Continue
             else do
-                unless no_status $ outputFill currTime Nothing $ "Reloading..." : map ("  " ++) reason
+                unless no_status $ outputFill currTime Nothing ("Reloading..." : map ("  " ++) reason) slowestPasses
                 nextWait <- waitFiles waiter
                 fire nextWait =<< sessionReload session
 
-    fire nextWait (messages, loaded)
+    fire nextWait (messages, loaded, slowestPasses)
 
 
 -- | Given an available height, and a set of messages to display, show them as best you can.
-prettyOutput :: Maybe Int -> String -> Int -> [Load] -> [String]
-prettyOutput _ currTime loaded [] =
-    [allGoodMessage ++ " (" ++ show loaded ++ " module" ++ ['s' | loaded /= 1] ++ ", at " ++ currTime ++ ")"]
-prettyOutput maxMsgs _ loaded xs = concat $ maybe id take maxMsgs $ map loadMessage xs
+prettyOutput :: Maybe Int -> String -> Int -> [Load] -> [(Pass, String, Double, Double)] -> [String]
+prettyOutput _ currTime loaded [] slowestPasses =
+    (allGoodMessage ++ " (" ++ show loaded ++ " module" ++ ['s' | loaded /= 1] ++ ", at " ++ currTime ++ ")")
+    : map show slowestPasses
+prettyOutput maxMsgs _ loaded xs slowestPasses = concat (maybe id take maxMsgs $ map loadMessage xs) ++ map show slowestPasses
 
 
 showJSON :: [(String, [String])] -> String

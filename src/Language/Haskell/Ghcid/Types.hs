@@ -4,8 +4,8 @@
 module Language.Haskell.Ghcid.Types(
     GhciError(..),
     Stream(..),
-    Load(..), Severity(..),
-    isMessage, isLoading, isLoadConfig
+    Load(..), Severity(..), Pass(..),
+    isMessage, isLoading, isLoadConfig, isPassTiming
     ) where
 
 import Data.Data
@@ -26,6 +26,19 @@ data Stream = Stdout | Stderr
 data Severity = Warning | Error
     deriving (Show,Eq,Ord,Bounded,Enum,Read,Typeable,Data)
 
+data Pass =
+       Parser
+     | Desugar
+     | RenamerSlashTypechecker
+     | Simplifier
+     | CoreTidy
+     | CorePrep
+     | CodeGen
+     | ByteCodeGen
+     | Simplify
+     | Chasing
+    deriving (Show, Eq, Ord)
+
 -- | Load messages
 data Load
     = -- | A module/file was being loaded.
@@ -45,6 +58,13 @@ data Load
       LoadConfig
         {loadFile :: FilePath -- ^ The file that was being loaded, @.ghci@.
         }
+    | -- | Info about how long things took, enabled by -dshow-pass
+      PassTiming
+        { loadPass :: Pass
+        , loadModule :: String
+        , loadTime :: Double
+        , loadMegabytes :: Double
+        }
     deriving (Show, Eq, Ord)
 
 -- | Is a 'Load' a 'Message'?
@@ -61,3 +81,7 @@ isLoading _ = False
 isLoadConfig :: Load -> Bool
 isLoadConfig LoadConfig{} = True
 isLoadConfig _ = False
+
+isPassTiming :: Load -> Bool
+isPassTiming PassTiming{} = True
+isPassTiming _ = False

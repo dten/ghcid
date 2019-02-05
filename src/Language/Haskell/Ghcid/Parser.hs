@@ -17,6 +17,8 @@ import Prelude
 import Language.Haskell.Ghcid.Types
 import Language.Haskell.Ghcid.Escape
 
+import Debug.Trace
+
 
 -- | Parse messages from show modules command. Given the parsed lines
 --   return a list of (module name, file).
@@ -33,6 +35,27 @@ parseShowPaths (map unescape -> xs)
     | (_:x:_:is) <- xs = (trimStart x, map trimStart is)
     | otherwise = (".",[])
 
+passify :: [String] -> Maybe (Pass, String, Double, Double)
+passify x = do
+    (p, m, t, mbs) <- case x of
+        "!!!":p:m:"finished":"in":t:"milliseconds,":"allocated":mbs:"megabytes":_ -> Just (p, m , t, mbs)
+        _ -> Nothing
+    t <- readMaybe t
+    mbs <- readMaybe mbs
+    p <- case p of
+        "Chasing" -> Just Chasing
+        "Parser" -> Just Parser
+        "Desugar" -> Just Desugar
+        "Renamer/typechecker" -> Just RenamerSlashTypechecker
+        "Simplify" -> Just Simplify
+        "Simplifier" -> Just Simplifier
+        "CoreTidy" -> Just CoreTidy
+        "CorePrep" -> Just CorePrep
+        "CodeGen" -> Just CodeGen
+        "ByteCodeGen" -> Just ByteCodeGen
+        e -> trace ("Unknown pass: " ++ p) Nothing
+    return (p, m, t, mbs)
+
 -- | Parse messages given on reload.
 parseLoad :: [String] -> [Load]
 -- nub, because cabal repl sometimes does two reloads at the start
@@ -45,6 +68,10 @@ parseLoad (map Esc -> xs) = nubOrd $ f xs
             | Just xs <- stripPrefixE "[" xs
             = map (uncurry Loading) (parseShowModules [drop 11 $ dropWhile (/= ']') $ unescapeE xs]) ++
               f rest
+
+        f (x:xs)
+            | Just (p, m, t, mbs) <- passify (words (fromEsc x))
+            = PassTiming p m t mbs : f xs
 
         -- GHCi.hs:81:1: Warning: Defined but not used: `foo'
         f (x:xs)
@@ -61,7 +88,7 @@ parseLoad (map Esc -> xs) = nubOrd $ f xs
         -- <no location info>: can't find file: FILENAME
         f (x:xs)
             | Just file <- stripPrefixE "<no location info>: can't find file: " x
-            = Message Error (unescapeE file) (0,0) (0,0) [fromEsc x] : f xs
+            = Message Error (unescapeE file) (0,0) (0,0) [fromEsc x] : f xs            
 
         -- Module imports form a cycle:
         --   module `Module' (Module.hs) imports itself

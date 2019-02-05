@@ -184,7 +184,11 @@ startGhciProcess process echo0 = do
                     writeIORef sync =<< syncFresh
                 echo0 strm s
                 return Nothing
-        r1 <- parseLoad . reverse <$> ((++) <$> readIORef stderr <*> readIORef stdout)
+
+        stderr <- readIORef stderr
+        stdout <- readIORef stdout
+        let r1 = parseLoad (reverse stdout) ++ parseLoad (reverse stderr)
+
         -- see #132, if hide-source-paths was turned on the modules didn't get printed out properly
         -- so try a showModules to capture the information again
         r2 <- if any isLoading r1 then return [] else map (uncurry Loading) <$> showModules ghci

@@ -1,6 +1,7 @@
 build-type:         Simple
 name:               project-x
 version:            0
+cabal-version:      >= 1.18
 
 library
     hs-source-dirs: src
